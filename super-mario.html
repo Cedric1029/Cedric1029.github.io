@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Super Mario · 移动端复刻</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body {
+  height:100%; width:100%;
+  background:#000; overflow:hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: none;
+  font-family: "Press Start 2P","Microsoft YaHei",monospace;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+  position: fixed; inset: 0;
+}
+#wrap {
+  position:fixed; inset:0;
+  display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+  background: radial-gradient(circle at 50% 30%, #4a90e2 0%, #1b3a6b 70%, #0a1838 100%);
+}
+#stage {
+  position:relative; flex:1 1 auto;
+  width:min(100vw, calc((100vh - 110px) * 5/3));
+  max-width:900px;
+  max-height:calc(100vh - 110px);
+  aspect-ratio: 5/3;
+  box-shadow:0 0 0 4px #111, 0 20px 60px rgba(0,0,0,.6), 0 0 80px rgba(80,160,255,.25);
+  border-radius:6px; overflow:hidden;
+}
+canvas#game {
+  display:block; width:100%; height:100%;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+  background:#5c94fc;
+  touch-action: none;
+}
+/* 触摸控制 - 放在游戏下方 */
+#touch {
+  flex:0 0 auto; width:100%; max-width:1100px; height:100px;
+  display:none; align-items:center; justify-content:space-between;
+  padding:4px 12px 8px;
+  background:rgba(0,0,0,.5);
+}
+@media (pointer:coarse) { #touch { display:flex; } }
+#touch .dpad {
+  display:grid; grid-template-columns:48px 48px 48px; grid-template-rows:48px 48px 48px; gap:2px;
+}
+#touch .dpad .tbtn { border-radius:10px; border-width:2px; font-size:18px; }
+#touch .dpad .tbtn:nth-child(1){ grid-column:2; grid-row:1; } /* up-jump */
+#touch .dpad .tbtn:nth-child(2){ grid-column:1; grid-row:2; } /* left */
+#touch .dpad .tbtn:nth-child(3){ grid-column:3; grid-row:2; } /* right */
+#touch .dpad .tbtn:nth-child(4){ grid-column:2; grid-row:3; } /* down */
+#touch .acts { display:flex; gap:8px; align-items:center; }
+#touch .acts .tbtn { width:52px; height:52px; border-radius:50%; font-size:15px; border-width:2px; }
+#touch .acts .tbtn.jump { width:64px; height:64px; background:rgba(229,37,33,.35); border-color:rgba(229,37,33,.7); border-width:3px; font-size:20px; }
+.tbtn {
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(255,255,255,.15); border:3px solid rgba(255,255,255,.45);
+  color:#fff; font-size:18px; font-weight:bold;
+  -webkit-tap-highlight-color:transparent;
+  user-select:none; -webkit-user-select:none;
+  touch-action: none;
+}
+.tbtn:active { background:rgba(255,255,255,.35); }
+#hint {
+  position:absolute; top:2px; left:50%; transform:translateX(-50%);
+  color:rgba(255,255,255,.45); font-size:9px; letter-spacing:0.3px;
+  text-shadow:0 1px 2px #000; pointer-events:none; white-space:nowrap; z-index:5;
+}
+/* 横屏时触摸栏缩小 */
+@media (orientation:landscape) and (pointer:coarse) {
+  #touch { height:82px; padding:2px 12px 4px; }
+  #stage { max-height:calc(100vh - 82px); width:min(100vw, calc((100vh - 82px) * 5/3)); }
+  #touch .dpad { grid-template-columns:40px 40px 40px; grid-template-rows:40px 40px 40px; }
+  #touch .acts .tbtn { width:44px; height:44px; font-size:13px; }
+  #touch .acts .tbtn.jump { width:54px; height:54px; font-size:17px; }
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="game" width="800" height="480"></canvas>
+    <div id="hint">← → 移动 · Space/↑ 跳跃 · Shift 加速 · Z 火球</div>
+  </div>
+  <div id="touch">
+    <div class="dpad">
+      <div class="tbtn" data-act="jump">▲</div>
+      <div class="tbtn" data-act="left">◀</div>
+      <div class="tbtn" data-act="right">▶</div>
+      <div class="tbtn" data-act="down">▼</div>
+    </div>
+    <div class="acts">
+      <div class="tbtn" data-act="run">B</div>
+      <div class="tbtn" data-act="fire">★</div>
+      <div class="tbtn jump" data-act="jump">A</div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================
+   Super Mario — 移动端优化版
+   全过程化绘制 | 固定时间步物理 | 瓦片碰撞 | 多点触控
+   ===================================================================== */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const VW = canvas.width, VH = canvas.height;
+const TILE = 32;
+const GRAV = 0.62;
+const MAX_FALL = 13;
+
+/* ========== 颜色表 ========== */
+const C = {
+  sky:'#5c94fc', skyTop:'#8fc4ff',
+  red:'#e52521', redD:'#b3181a', blue:'#1f4fe0', blueD:'#1639a8',
+  skin:'#fcbc8c', skinS:'#e09a5e', hair:'#6b3e06', hairD:'#4a2a04',
+  white:'#ffffff', black:'#0c0c0c', yellow:'#ffd54a', yellowD:'#d39a00',
+  green:'#3fae2a', greenD:'#1d6e15', greenL:'#74e34a',
+  brown:'#c8741b', brownD:'#8a4a0e', tan:'#f0c090',
+  pipe:'#19b525', pipeD:'#0a7a14', pipeL:'#7bff7b',
+  bush:'#3fae2a', hill:'#1f9e2a', cloud:'#ffffff',
+  metal:'#bdbdbd', metalD:'#7d7d7d', metalL:'#ffffff',
+  coin:'#ffd54a', coinD:'#e09a00', orange:'#ff8c00',
+  goomba:'#8a4a0e', goombaD:'#5a3008',
+  koopa:'#23b53a', koopaD:'#0d6e1c', koopaY:'#f0c000', shell:'#1d8a2a'
+};
+
+/* ========== 装饰物列表(性能优化：不遍历全图) ========== */
+const decoClouds=[], decoHills=[], decoBushes=[];
+function regDeco(type,c,r){ if(type==='cloud')decoClouds.push({c,r}); else if(type==='hill')decoHills.push({c,r}); else if(type==='bush')decoBushes.push({c,r}); }
+
+/* ========== 瓦片类型 ========== */
+const T = { EMPTY:0, GROUND:1, BRICK:2, QCOIN:3, QMUSH:4, QFIRE:5, USED:6, PIPE:7, PIPETOP:8,
+            HARD:9, COIN:10, POLE:11, POLETOP:12, POLEBASE:13, BUSH:14, HILL:15, CLOUD:16, STAIR:17 };
+const SOLID = new Set([T.GROUND,T.BRICK,T.QCOIN,T.QMUSH,T.QFIRE,T.USED,T.PIPE,T.PIPETOP,T.HARD,T.STAIR]);
+const BUMPABLE = new Set([T.BRICK,T.QCOIN,T.QMUSH,T.QFIRE,T.USED]);
+
+/* ========== 输入系统 ========== */
+const keys = { left:false,right:false,jump:false,run:false,fire:false,down:false };
+const keymap = {
+  ArrowLeft:'left', KeyA:'left',
+  ArrowRight:'right', KeyD:'right',
+  ArrowDown:'down', KeyS:'down',
+  ArrowUp:'jump', KeyW:'jump', Space:'jump',
+  ShiftLeft:'run', ShiftRight:'run',
+  KeyZ:'fire', KeyX:'fire', KeyJ:'fire'
+};
+let jumpLatch=false, fireLatch=false;
+let jumpBuffer=0; // 跳跃预输入缓冲（帧数）
+
+// 键盘
+addEventListener('keydown', e=>{
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+  const k=keymap[e.code]; if(k){ if(k==='jump')jumpLatch=jumpLatch||!keys.jump; if(k==='fire')fireLatch=fireLatch||!keys.fire; keys[k]=true; startGameMaybe(); }
+});
+addEventListener('keyup', e=>{ const k=keymap[e.code]; if(k) keys[k]=false; });
+
+// 多点触控追踪
+const touchFingers = new Map(); // identifier -> action
+const touchBtns = document.querySelectorAll('#touch .tbtn');
+
+// 预计算按钮的命中区域（监听 resize 更新）
+let btnRects = [];
+function updateBtnRects(){
+  btnRects = [];
+  for(const btn of touchBtns){
+    const r = btn.getBoundingClientRect();
+    btnRects.push({ act: btn.dataset.act, left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+  }
+}
+window.addEventListener('resize', updateBtnRects);
+window.addEventListener('orientationchange', ()=>{ setTimeout(updateBtnRects, 200); });
+updateBtnRects();
+
+function getTouchAct(touch){
+  // 遍历预计算的按钮区域，找到命中的按钮
+  for(const br of btnRects){
+    if(touch.clientX >= br.left && touch.clientX <= br.right &&
+       touch.clientY >= br.top && touch.clientY <= br.bottom){
+      return br.act;
+    }
+  }
+  return null;
+}
+
+function updateKeysFromTouches(){
+  // 重置触摸按键
+  const ta = ['left','right','jump','run','fire','down'];
+  for(const k of ta) keys[k] = false;
+  for(const [id, act] of touchFingers){
+    keys[act] = true;
+  }
+}
+
+// ★ 绑定到 document（而不是 canvas），这样触摸按钮和 canvas 都响应
+function handleTouchStart(e){
+  e.preventDefault();
+  updateBtnRects(); // 确保矩形区域是最新的
+  for(const t of e.changedTouches){
+    const act = getTouchAct(t);
+    if(act){
+      touchFingers.set(t.identifier, act);
+      if(act === 'jump') jumpLatch = true;
+      if(act === 'fire') fireLatch = true;
+      startGameMaybe();
+    } else {
+      // 触摸在按钮区域外 → 视为"开始游戏"
+      startGameMaybe();
+    }
+  }
+  updateKeysFromTouches();
+}
+
+function handleTouchMove(e){
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    if(touchFingers.has(t.identifier)){
+      const act = getTouchAct(t);
+      if(act) touchFingers.set(t.identifier, act);
+      // 手指滑出所有按钮 → 清除该手指
+      else touchFingers.delete(t.identifier);
+    }
+  }
+  updateKeysFromTouches();
+}
+
+function handleTouchEnd(e){
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    const act = touchFingers.get(t.identifier);
+    touchFingers.delete(t.identifier);
+    // 手指抬起时取消对应的锁存器
+    if(act === 'jump') jumpLatch = false;
+    if(act === 'fire') fireLatch = false;
+  }
+  updateKeysFromTouches();
+}
+
+function handleTouchCancel(e){
+  for(const t of e.changedTouches){
+    const act = touchFingers.get(t.identifier);
+    touchFingers.delete(t.identifier);
+    if(act === 'jump') jumpLatch = false;
+    if(act === 'fire') fireLatch = false;
+  }
+  updateKeysFromTouches();
+}
+
+document.addEventListener('touchstart', handleTouchStart, {passive: false});
+document.addEventListener('touchmove', handleTouchMove, {passive: false});
+document.addEventListener('touchend', handleTouchEnd, {passive: false});
+document.addEventListener('touchcancel', handleTouchCancel, {passive: false});
+
+// 鼠标支持（PC 调试用）
+touchBtns.forEach(b => {
+  const act = b.dataset.act;
+  b.addEventListener('mousedown', e => {
+    e.preventDefault();
+    if(act === 'jump') jumpLatch = true;
+    if(act === 'fire') fireLatch = true;
+    keys[act] = true;
+    startGameMaybe();
+  });
+  b.addEventListener('mouseup', e => { e.preventDefault(); keys[act] = false; });
+  b.addEventListener('mouseleave', e => { keys[act] = false; });
+});
+
+/* ========== 音效 ========== */
+let AC=null;
+function audio(){ if(!AC){ try{ AC=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return AC; }
+function blip(freq, dur, type='square', vol=0.08, slideTo=null){
+  const a=audio(); if(!a) return;
+  const o=a.createOscillator(), g=a.createGain();
+  o.type=type; o.frequency.value=freq;
+  if(slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, a.currentTime+dur);
+  g.gain.setValueAtTime(vol, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime+dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(); o.stop(a.currentTime+dur);
+}
+function noise(dur, vol=0.12){
+  const a=audio(); if(!a) return;
+  const n=a.createBufferSource(), buf=a.createBuffer(1, a.sampleRate*dur|0, a.sampleRate);
+  const d=buf.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*(1-i/d.length);
+  n.buffer=buf; const g=a.createGain(); g.gain.value=vol;
+  n.connect(g); g.connect(a.destination); n.start();
+}
+const SFX = {
+  jump:()=>blip(380,0.16,'square',0.07,760),
+  bump:()=>blip(180,0.08,'square',0.08,120),
+  coin:()=>{ blip(988,0.08,'square',0.07); setTimeout(()=>blip(1319,0.18,'square',0.07),80); },
+  stomp:()=>{ blip(300,0.06,'square',0.1,100); noise(0.08,0.08); },
+  kick:()=>blip(200,0.12,'square',0.09,90),
+  powerup:()=>{ [523,659,784,1047].forEach((f,i)=>setTimeout(()=>blip(f,0.12,'square',0.07),i*70)); },
+  powerdown:()=>blip(440,0.3,'square',0.08,110),
+  fire:()=>blip(700,0.1,'sawtooth',0.05,300),
+  die:()=>{ [659,622,587,554].forEach((f,i)=>setTimeout(()=>blip(f,0.18,'square',0.08),i*150)); },
+  win:()=>{ [523,659,784,1047,1319,1568].forEach((f,i)=>setTimeout(()=>blip(f,0.16,'square',0.08),i*120)); },
+  pipe:()=>blip(120,0.4,'square',0.06,300),
+  break:()=>noise(0.18,0.14),
+  oneup:()=>{ [784,988,1319].forEach((f,i)=>setTimeout(()=>blip(f,0.12,'square',0.07),i*60)); }
+};
+
+/* ========== 背景音乐 ========== */
+// 简化的 SMB1 地上关卡主题旋律
+const SMB_THEME = [
+  // [频率, 时长(拍)], 一拍 ≈ 0.12s
+  [659,2],[659,2],[0,2],[659,2],[0,2],[523,2],[659,2],[0,2],
+  [784,4],[0,4],[392,4],[0,4],
+  [523,3],[0,1],[392,3],[0,1],[330,3],[0,1],
+  [440,2],[0,1],[466,2],[0,1],[440,2],[0,2],
+  [392,2],[659,2],[784,2],[880,2],[698,2],[784,2],[0,2],
+  [659,2],[0,2],[523,2],[587,2],[494,2],[0,4],
+  // loop部分
+  [523,2],[0,2],[392,2],[0,2],[330,2],[0,2],
+  [440,2],[0,1],[466,2],[0,1],[440,2],[0,2],
+  [392,2],[659,2],[784,2],[880,2],[698,2],[784,2],[0,2],
+  [659,2],[0,2],[523,2],[587,2],[494,2],[0,4],
+];
+
+let musicTimer=null, musicNoteIdx=0, musicBeatAcc=0;
+const MUSIC_BPM=500; // 拍速 ms/beat (500ms = 120bpm)
+
+function musicTick(){
+  if(!AC) return;
+  const note=SMB_THEME[musicNoteIdx];
+  if(!note) return;
+  const [freq,beats]=note;
+  const dur=beats*MUSIC_BPM/1000;
+
+  if(freq>0 && state===GS.PLAY){
+    // 方波 + 三角波叠加，模拟 NES 音色
+    const o1=AC.createOscillator(), g1=AC.createGain();
+    o1.type='square'; o1.frequency.value=freq;
+    g1.gain.setValueAtTime(0.055, AC.currentTime);
+    g1.gain.exponentialRampToValueAtTime(0.001, AC.currentTime+dur*0.95);
+    o1.connect(g1); g1.connect(AC.destination);
+    o1.start(); o1.stop(AC.currentTime+dur);
+
+    // 低八度三角波增加厚度
+    const o2=AC.createOscillator(), g2=AC.createGain();
+    o2.type='triangle'; o2.frequency.value=freq/2;
+    g2.gain.setValueAtTime(0.025, AC.currentTime);
+    g2.gain.exponentialRampToValueAtTime(0.001, AC.currentTime+dur*0.95);
+    o2.connect(g2); g2.connect(AC.destination);
+    o2.start(); o2.stop(AC.currentTime+dur);
+  }
+
+  musicNoteIdx=(musicNoteIdx+1)%SMB_THEME.length;
+  // 下一拍的延时
+  const wait=beats*MUSIC_BPM;
+  musicTimer=setTimeout(musicTick, wait);
+}
+
+function startMusic(){
+  stopMusic();
+  if(audio()){
+    musicNoteIdx=0; musicBeatAcc=0;
+    musicTick();
+  }
+}
+
+function stopMusic(){
+  if(musicTimer){ clearTimeout(musicTimer); musicTimer=null; }
+}
+
+/* ========== 游戏状态 ========== */
+const GS = { TITLE:0, PLAY:1, DEAD:2, WIN:3, GAMEOVER:4 };
+let state=GS.TITLE;
+let score=0, coins=0, lives=3, time=400, timeAcc=0, lvlNum=0;
+let world={ tiles:[], cols:0, rows:0, w:0, h:0, cam:0 };
+let player=null;
+let enemies=[], items=[], fireballs=[], particles=[], floats=[];
+let flagX=0, flagY=0, flagBaseY=0;
+let winTimer=0;
+
+function tileAt(c,r){
+  if(r<0||r>=world.rows) return T.EMPTY;
+  if(c<0) return T.GROUND;
+  if(c>=world.cols) return T.EMPTY;
+  return world.tiles[r*world.cols+c];
+}
+function setTile(c,r,v){ if(r>=0&&r<world.rows&&c>=0&&c<world.cols) world.tiles[r*world.cols+c]=v; }
+
+/* ========== 关卡构建 ========== */
+const levels=[
+  // Level 1-1: 经典
+  function(){
+    const COLS=220, ROWS=15, G=13;
+    world.cols=COLS; world.rows=ROWS; world.w=COLS*TILE; world.h=ROWS*TILE;
+    world.tiles=new Array(COLS*ROWS).fill(T.EMPTY); world.cam=0;
+    enemies=[]; items=[]; fireballs=[]; particles=[]; floats=[];
+    decoClouds.length=0; decoHills.length=0; decoBushes.length=0;
+
+    // 地面
+    const fillGround=(c0,c1)=>{ for(let c=c0;c<=c1;c++){ setTile(c,G,T.GROUND); setTile(c,G+1,T.GROUND); } };
+    fillGround(0,COLS-1);
+    // 坑
+    [[69,71],[93,95],[128,130],[160,162]].forEach(([a,b])=>{ for(let c=a;c<=b;c++){ setTile(c,G,T.EMPTY); setTile(c,G+1,T.EMPTY); } });
+
+    // 问号块 & 砖块 第一组
+    setTile(16,9,T.QCOIN);
+    setTile(20,9,T.BRICK); setTile(21,9,T.QMUSH); setTile(22,9,T.BRICK); setTile(23,9,T.QCOIN); setTile(24,9,T.BRICK);
+    setTile(22,5,T.COIN); setTile(23,5,T.COIN); setTile(24,5,T.COIN);
+    // 第二组
+    setTile(41,9,T.BRICK); setTile(43,9,T.QFIRE); setTile(45,9,T.BRICK);
+    setTile(77,5,T.QCOIN); setTile(78,5,T.BRICK); setTile(79,5,T.QCOIN);
+    setTile(96,9,T.BRICK); setTile(97,9,T.QMUSH); setTile(98,9,T.BRICK); setTile(99,9,T.QCOIN);
+
+    // 管道
+    const pipe=(c,h)=>{ for(let i=0;i<h;i++){ setTile(c,G-1-i,T.PIPE); setTile(c+1,G-1-i,T.PIPE); }
+                        setTile(c,G-h,T.PIPETOP); setTile(c+1,G-h,T.PIPETOP); };
+    pipe(28,2); pipe(38,3); pipe(46,4); pipe(57,2); pipe(108,3); pipe(117,4);
+
+    // 砖块长廊
+    for(let c=82;c<=90;c++) setTile(c,9,T.BRICK);
+    setTile(85,9,T.QCOIN); setTile(86,9,T.QMUSH);
+    // 浮空金币
+    for(let c=100;c<=104;c++) setTile(c,6,T.COIN);
+    for(let c=135;c<=140;c++) setTile(c,8,T.COIN);
+    for(let c=136;c<=139;c++) setTile(c,3,T.COIN);
+    // 后期砖块
+    setTile(133,9,T.BRICK); setTile(134,9,T.QCOIN); setTile(135,9,T.BRICK);
+    setTile(170,9,T.BRICK); setTile(172,9,T.QMUSH); setTile(174,9,T.BRICK); setTile(173,5,T.COIN);
+    setTile(178,9,T.BRICK); setTile(179,9,T.QFIRE); setTile(180,9,T.BRICK);
+
+    // 终梯
+    for(let i=0;i<8;i++) for(let j=0;j<=i;j++) setTile(190+i, G-1-j, T.STAIR);
+    // 旗杆
+    flagX=198*TILE+TILE/2; flagY=3*TILE; flagBaseY=G*TILE;
+    setTile(198,3,T.POLETOP);
+    for(let r=4;r<=G;r++) setTile(198,r,T.POLE);
+    setTile(198,G+1,T.POLEBASE);
+    setTile(199,G,T.GROUND); setTile(199,G+1,T.GROUND);
+
+    // 装饰
+    [10,52,120,175].forEach(c=>{regDeco('hill',c,12); setTile(c,12,T.HILL);});
+    [22,63,95,150].forEach(c=>{regDeco('bush',c,12); setTile(c,12,T.BUSH);});
+    [[8,2],[34,1],[66,3],[90,2],[130,1],[165,3]].forEach(([c,r])=>{regDeco('cloud',c,r); setTile(c,r,T.CLOUD);});
+
+    // 敌人
+    const goomba=c=>enemies.push(makeEnemy('goomba',c*TILE+4,(G-1)*TILE));
+    const koopa=c=>enemies.push(makeEnemy('koopa',c*TILE+4,(G-1)*TILE));
+    [22,40,50,51,80,82,89,105,112,113,140,141,155,168,185].forEach(goomba);
+    [36,84,115,175,186].forEach(koopa);
+
+    player=makePlayer(3*TILE,(G-2)*TILE);
+    time=400; timeAcc=0;
+  },
+  // Level 1-2: 更多平台
+  function(){
+    const COLS=220, ROWS=15, G=13;
+    world.cols=COLS; world.rows=ROWS; world.w=COLS*TILE; world.h=ROWS*TILE;
+    world.tiles=new Array(COLS*ROWS).fill(T.EMPTY); world.cam=0;
+    enemies=[]; items=[]; fireballs=[]; particles=[]; floats=[];
+    decoClouds.length=0; decoHills.length=0; decoBushes.length=0;
+
+    const fillGround=(c0,c1)=>{ for(let c=c0;c<=c1;c++){ setTile(c,G,T.GROUND); setTile(c,G+1,T.GROUND); } };
+    fillGround(0,COLS-1);
+    [[55,58],[87,90],[118,121],[155,158]].forEach(([a,b])=>{ for(let c=a;c<=b;c++){ setTile(c,G,T.EMPTY); setTile(c,G+1,T.EMPTY); } });
+
+    // 浮空平台
+    const platform=(c,r,len)=>{ for(let i=0;i<len;i++) setTile(c+i,r,T.BRICK); };
+    platform(30,10,4); platform(50,8,3); platform(68,10,5);
+    platform(95,7,6); platform(110,9,4); platform(140,8,5);
+
+    // 问号块
+    setTile(20,9,T.QCOIN); setTile(21,9,T.QFIRE); setTile(22,9,T.QCOIN);
+    setTile(40,9,T.QMUSH); setTile(60,9,T.QCOIN); setTile(61,9,T.BRICK);
+    setTile(100,9,T.QFIRE); setTile(101,9,T.QCOIN);
+    setTile(130,9,T.BRICK); setTile(131,9,T.QCOIN); setTile(132,9,T.BRICK);
+    setTile(145,5,T.QCOIN); setTile(146,5,T.QMUSH); setTile(147,5,T.QCOIN);
+    // 金币
+    for(let c=70;c<=74;c++){ setTile(c,6,T.COIN); setTile(c,3,T.COIN); }
+    for(let c=150;c<=155;c++) setTile(c,7,T.COIN);
+
+    // 管道
+    [28,48,78,125,170].forEach((c,i)=>{ const h=2+(i%3); for(let j=0;j<h;j++){ setTile(c,G-1-j,T.PIPE); setTile(c+1,G-1-j,T.PIPE); } setTile(c,G-h,T.PIPETOP); setTile(c+1,G-h,T.PIPETOP); });
+
+    // 终梯
+    for(let i=0;i<8;i++) for(let j=0;j<=i;j++) setTile(190+i, G-1-j, T.STAIR);
+    flagX=198*TILE+TILE/2; flagY=3*TILE; flagBaseY=G*TILE;
+    setTile(198,3,T.POLETOP);
+    for(let r=4;r<=G;r++) setTile(198,r,T.POLE);
+    setTile(198,G+1,T.POLEBASE);
+    setTile(199,G,T.GROUND); setTile(199,G+1,T.GROUND);
+
+    [10,60,130,185].forEach(c=>{regDeco('hill',c,12); setTile(c,12,T.HILL);});
+    [25,85,155].forEach(c=>{regDeco('bush',c,12); setTile(c,12,T.BUSH);});
+    [[5,2],[35,1],[70,3],[100,2],[140,1],[170,3]].forEach(([c,r])=>{regDeco('cloud',c,r); setTile(c,r,T.CLOUD);});
+
+    const goomba=c=>enemies.push(makeEnemy('goomba',c*TILE+4,(G-1)*TILE));
+    const koopa=c=>enemies.push(makeEnemy('koopa',c*TILE+4,(G-1)*TILE));
+    [18,24,42,65,80,98,103,120,135,148,160,172,182].forEach(goomba);
+    [35,75,105,150,180].forEach(koopa);
+
+    player=makePlayer(3*TILE,(G-2)*TILE);
+    time=400; timeAcc=0;
+  }
+];
+
+function buildLevel(n){
+  lvlNum=n%levels.length;
+  levels[lvlNum]();
+}
+
+/* ========== 实体工厂 ========== */
+function makePlayer(x,y){
+  return { x,y,w:24,h:30,vx:0,vy:0,onGround:false,facing:1,
+           state:'small',pose:'stand',frame:0,frameTime:0,
+           invuln:0,star:0,dead:false,deadT:0,crouching:false,
+           fireCool:0,jumpHeld:false,walkPhase:0 };
+}
+function makeEnemy(type,x,y){
+  const base={ type,x,y,vx:-0.6,vy:0,w:28,h:28,alive:true,
+              frame:0,frameTime:0,state:'walk',squishT:0,shellVx:0,dir:-1 };
+  if(type==='koopa'){ base.w=28; base.h=42; base.y=y-(42-28); }
+  return base;
+}
+function makeItem(type,x,y){ return { type,x,y,w:28,h:28,vx:0.6,vy:0,emerging:0,emergeY:y,alive:true,frame:0,frameTime:0,dir:1 }; }
+function makeFireball(x,y,dir){ return { x,y,w:12,h:12,vx:dir*5.5,vy:2,bounces:0,alive:true,frame:0,frameTime:0 }; }
+function spark(x,y,color,n=8){ for(let i=0;i<n;i++) particles.push({x,y,vx:(Math.random()*2-1)*3,vy:(Math.random()*-1-1)*2,life:25+Math.random()*15,color,size:2+Math.random()*2}); }
+function floatText(x,y,txt,color='#fff'){ floats.push({x,y,txt,color,life:50,vy:-0.6}); }
+
+/* ========== 碰撞 ========== */
+function tilesOverlap(x,y,w,h){
+  const c0=Math.floor(x/TILE), c1=Math.floor((x+w-1)/TILE);
+  const r0=Math.floor(y/TILE), r1=Math.floor((y+h-1)/TILE);
+  const hits=[];
+  for(let r=r0;r<=r1;r++) for(let c=c0;c<=c1;c++){ const t=tileAt(c,r); if(SOLID.has(t)) hits.push({c,r,t}); }
+  return hits;
+}
+
+/* ========== 砖块弹跳 ========== */
+const bumpMap = new Map();
+function bumpKey(c,r){ return c*1000+r; }
+function bumpAnim(c,r){ bumpMap.set(bumpKey(c,r),{off:0,t:0}); }
+
+/* ========== 玩家更新 ========== */
+function updatePlayer(){
+  const p=player;
+  if(p.dead){ p.deadT++; p.vy=Math.min(p.vy+GRAV,MAX_FALL); p.y+=p.vy; if(p.deadT>120) afterDeath(); return; }
+
+  const accel=keys.run?0.34:0.22;
+  const maxv=keys.run?5.6:3.6;
+  if(keys.left&&!keys.right){ p.vx-=accel; if(p.vx<-maxv)p.vx=-maxv; p.facing=-1; }
+  else if(keys.right&&!keys.left){ p.vx+=accel; if(p.vx>maxv)p.vx=maxv; p.facing=1; }
+  else { p.vx*=0.80; if(Math.abs(p.vx)<0.05)p.vx=0; }
+
+  p.crouching=keys.down && p.state!=='small';
+  const targetH=p.state==='small'?30:(p.crouching?34:56);
+  if(p.h!==targetH){ const dy=p.h-targetH; p.h=targetH; p.y+=dy; }
+
+  // 跳跃预输入：空中按下 → 存入缓冲区
+  if(jumpLatch && !p.onGround){ jumpBuffer=8; jumpLatch=false; }
+  // 跳跃执行：着地时检查缓冲或锁存
+  if((jumpLatch || jumpBuffer>0) && p.onGround){ p.vy=-12.6; p.onGround=false; SFX.jump(); jumpLatch=false; jumpBuffer=0; }
+  if(!p.onGround) jumpBuffer=Math.max(0,jumpBuffer-1);
+  if(keys.jump && p.vy<0) p.vy-=0.28;
+  p.vy+=GRAV; if(p.vy>MAX_FALL)p.vy=MAX_FALL;
+
+  p.fireCool=Math.max(0,p.fireCool-1);
+  if(fireLatch && p.state==='fire' && p.fireCool===0){
+    fireballs.push(makeFireball(p.x+(p.facing>0?p.w:0), p.y+p.h*0.4, p.facing));
+    p.fireCool=14; SFX.fire(); fireLatch=false;
+  }
+
+  p.hitWallX=false;
+  p.x+=p.vx;
+  let hx=tilesOverlap(p.x,p.y,p.w,p.h);
+  if(hx.length){
+    if(p.vx>0) p.x=Math.min(...hx.map(h=>h.c*TILE))-p.w;
+    else if(p.vx<0) p.x=Math.max(...hx.map(h=>(h.c+1)*TILE));
+    p.vx=0;
+  }
+
+  p.y+=p.vy; p.onGround=false;
+  let hy=tilesOverlap(p.x,p.y,p.w,p.h);
+  if(hy.length){
+    if(p.vy>0){ p.y=Math.min(...hy.map(h=>h.r*TILE))-p.h; p.onGround=true; p.vy=0; }
+    else if(p.vy<0){
+      p.y=Math.max(...hy.map(h=>(h.r+1)*TILE)); p.vy=0;
+      const cc=Math.floor((p.x+p.w/2)/TILE), rr=Math.floor((p.y-1)/TILE);
+      const t=tileAt(cc,rr);
+      if(BUMPABLE.has(t)) doBump(cc,rr,t);
+    }
+  }
+
+  if(p.x<0)p.x=0;
+  if(p.y>world.h+200) killPlayer(true);
+
+  if(Math.abs(p.vx)>0.3){ p.walkPhase+=Math.abs(p.vx)*0.12; p.pose='walk'; }
+  else p.pose='stand';
+  if(!p.onGround) p.pose='jump';
+  if(keys.left&&p.vx>0.5||keys.right&&p.vx<-0.5) p.pose='brake';
+  if(p.crouching) p.pose='crouch';
+
+  if(p.invuln>0)p.invuln--;
+
+  // 金币拾取
+  const pc0=Math.floor(p.x/TILE),pc1=Math.floor((p.x+p.w-1)/TILE);
+  const pr0=Math.floor(p.y/TILE),pr1=Math.floor((p.y+p.h-1)/TILE);
+  for(let r=pr0;r<=pr1;r++)for(let c=pc0;c<=pc1;c++){
+    if(tileAt(c,r)===T.COIN){ setTile(c,r,T.EMPTY); addCoin(p.x,p.y); }
+  }
+
+  // 旗杆检测
+  if(state===GS.PLAY && p.x+p.w>=flagX-6 && p.x<=flagX+12){ winLevel(); }
+}
+
+function doBump(c,r,t){
+  if(t===T.QCOIN||t===T.QMUSH||t===T.QFIRE){
+    const big=player.state!=='small';
+    let kind;
+    if(t===T.QCOIN) kind='coin';
+    else if(t===T.QMUSH) kind='mushroom';
+    else kind=big?'fire':'mushroom';
+    setTile(c,r,T.USED);
+    bumpAnim(c,r);
+    if(kind==='coin'){ addCoin(c*TILE+TILE/2, r*TILE); SFX.coin(); }
+    else { const it=makeItem(kind, c*TILE+2, (r-1)*TILE+8); it.emerging=18; it.emergeY=(r-1)*TILE; items.push(it); SFX.bump(); }
+  } else if(t===T.BRICK){
+    if(player.state!=='small'){
+      setTile(c,r,T.EMPTY); spark(c*TILE+TILE/2,r*TILE+TILE/2,C.brownD,12); SFX.break(); score+=50;
+    } else { bumpAnim(c,r); SFX.bump(); }
+  } else if(t===T.USED){ bumpAnim(c,r); SFX.bump(); }
+}
+
+function addCoin(x,y){ coins++; score+=200; if(coins>=100){coins-=100;lives++;SFX.oneup();} floatText(x,y-10,'200',C.yellow); spark(x,y,C.coin,6); }
+
+/* ========== 道具 ========== */
+function updateItems(){
+  for(const it of items){
+    if(!it.alive) continue;
+    if(it.emerging>0){ it.y-=1.1; it.emerging--; if(it.emerging===0){ it.y=it.emergeY; } continue; }
+    if(it.type==='fire'){ it.frameTime++; if(it.frameTime%8===0)it.frame^=1; if(aabb(it,player)) pickItem(it); continue; }
+    it.vy+=GRAV; if(it.vy>MAX_FALL)it.vy=MAX_FALL;
+    it.x+=it.vx; let hx=tilesOverlap(it.x,it.y,it.w,it.h);
+    if(hx.length){ if(it.vx>0)it.x=Math.min(...hx.map(h=>h.c*TILE))-it.w; else it.x=Math.max(...hx.map(h=>(h.c+1)*TILE)); it.vx=-it.vx; }
+    it.y+=it.vy; let hy=tilesOverlap(it.x,it.y,it.w,it.h);
+    if(hy.length){ if(it.vy>0){it.y=Math.min(...hy.map(h=>h.r*TILE))-it.h;it.vy=0;} else {it.y=Math.max(...hy.map(h=>(h.r+1)*TILE));it.vy=0;} }
+    it.frameTime++; if(it.frameTime%8===0)it.frame^=1;
+    if(aabb(it,player)) pickItem(it);
+    if(it.y>world.h+100) it.alive=false;
+  }
+  items=items.filter(i=>i.alive);
+}
+function pickItem(it){
+  it.alive=false;
+  if(it.type==='mushroom'){
+    if(player.state==='small'){ growPlayer('big'); } else { score+=1000; floatText(player.x,player.y,'1000',C.white); }
+    SFX.powerup(); score+=1000;
+  } else if(it.type==='fire'){
+    player.state='fire'; resizePlayer();
+    SFX.powerup(); score+=1000; floatText(player.x,player.y,'1000',C.red);
+  }
+}
+function growPlayer(s){ player.state=s; resizePlayer(); }
+function resizePlayer(){
+  if(player.state==='small') player.h=30;
+  else if(!player.crouching) player.h=56;
+  player.w=24;
+}
+
+/* ========== 敌人 ========== */
+function updateEnemies(){
+  for(const e of enemies){
+    if(!e.alive) continue;
+    if(e.state==='dead'){ e.vy+=GRAV; e.y+=e.vy; e.deadT=(e.deadT||0)+1; continue; }
+    if(e.state==='squished'){ e.squishT--; if(e.squishT<=0)e.alive=false; continue; }
+
+    e.frameTime++; if(e.frameTime%8===0)e.frame^=1;
+    e.vy+=GRAV; if(e.vy>MAX_FALL)e.vy=MAX_FALL;
+    // X
+    e.x+=e.vx; let hx=tilesOverlap(e.x,e.y,e.w,e.h);
+    if(hx.length){ if(e.vx>0)e.x=Math.min(...hx.map(h=>h.c*TILE))-e.w; else e.x=Math.max(...hx.map(h=>(h.c+1)*TILE)); e.vx=-e.vx; e.dir=-e.dir; }
+    // Y
+    e.y+=e.vy; e.onGround=false; let hy=tilesOverlap(e.x,e.y,e.w,e.h);
+    if(hy.length){ if(e.vy>0){e.y=Math.min(...hy.map(h=>h.r*TILE))-e.h;e.vy=0;e.onGround=true;} else {e.y=Math.max(...hy.map(h=>(h.r+1)*TILE));e.vy=0;} }
+    if(e.y>world.h+200) e.alive=false;
+
+    // 悬崖检测：敌人不掉坑
+    if(e.state==='walk' && e.onGround){
+      const ahead=e.vx>0? Math.floor((e.x+e.w+2)/TILE) : Math.floor((e.x-2)/TILE);
+      const footR=Math.floor((e.y+e.h+2)/TILE);
+      const aheadTile=tileAt(ahead,footR);
+      if(!SOLID.has(aheadTile) || (aheadTile!==T.GROUND && aheadTile!==T.BRICK && aheadTile!==T.STAIR && aheadTile!==T.HARD)){
+        // 前方无地面 → 掉头
+        const checkX=e.vx>0? Math.floor((e.x+e.w)/TILE) : Math.floor((e.x)/TILE);
+        const below=Math.floor((e.y+e.h+2)/TILE);
+        if(!SOLID.has(tileAt(checkX, below+1))) continue; // 已经在边缘
+        e.vx=-e.vx; e.dir=-e.dir;
+      }
+    }
+
+    // 玩家碰撞
+    if(!player.dead && aabb(e,player)) handleEnemyPlayer(e);
+
+    // 火球击中敌人
+    for(const f of fireballs){
+      if(f.alive && aabb(e,f)){ killEnemy(e,'fire'); f.alive=false; spark(f.x,f.y,C.orange,8); }
+    }
+
+    // 龟壳撞其他敌人
+    if(e.type==='koopa' && e.state==='shell' && Math.abs(e.vx)>0.5){
+      for(const o of enemies){
+        if(o!==e && o.alive && o.state!=='dead' && aabb(e,o)){
+          killEnemy(o,'shell'); score+=200; floatText(o.x,o.y,'200',C.white);
+        }
+      }
+    }
+  }
+  enemies=enemies.filter(e=>e.alive);
+}
+
+function aabb(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+
+function handleEnemyPlayer(e){
+  const p=player;
+  const pfalling=p.vy>1.2;
+  const pfeet=p.y+p.h;
+  if(e.type==='goomba'){
+    if(pfalling && pfeet < e.y+e.h*0.6){
+      e.state='squished'; e.squishT=24; e.vx=0; p.vy=-7; SFX.stomp(); score+=100; floatText(e.x,e.y,'100',C.white);
+    } else hurtPlayer();
+  } else if(e.type==='koopa'){
+    if(e.state==='walk'){
+      if(pfalling && pfeet < e.y+e.h*0.55){
+        e.state='shell'; e.h=28; e.y+=(42-28); e.vx=0; e.shellVx=0; p.vy=-7; SFX.stomp(); score+=100; floatText(e.x,e.y,'100',C.white);
+      } else hurtPlayer();
+    } else {
+      if(Math.abs(e.vx)>0.5){
+        if(pfalling && pfeet < e.y+e.h*0.6){ e.vx=0; e.shellVx=0; p.vy=-7; SFX.stomp(); }
+        else hurtPlayer();
+      } else {
+        const dir=(p.x+p.w/2)<(e.x+e.w/2)?1:-1;
+        e.vx=dir*6; e.shellVx=e.vx; SFX.kick(); p.invuln=Math.max(p.invuln,6);
+      }
+    }
+  }
+}
+
+function killEnemy(e,how){
+  if(e.state==='dead') return;
+  e.state='dead'; e.vy=-5; e.vx=how==='shell'?0:(e.vx||0); e.deadT=0; e.flip=true;
+  if(how==='fire'||how==='shell'){ SFX.kick(); score+=200; }
+}
+
+function hurtPlayer(){
+  const p=player;
+  if(p.invuln>0) return;
+  if(p.state==='fire'){ p.state='big'; resizePlayer(); p.invuln=120; SFX.powerdown(); }
+  else if(p.state==='big'){ p.state='small'; resizePlayer(); p.invuln=120; SFX.powerdown(); }
+  else killPlayer(false);
+}
+
+function killPlayer(fell){
+  if(player.dead)return; player.dead=true; player.deadT=0; player.vy=fell?-4:-9; player.vx=0; SFX.die(); state=GS.DEAD; stopMusic();
+}
+
+/* ========== 火球 ========== */
+function updateFireballs(){
+  for(const f of fireballs){
+    if(!f.alive)continue;
+    f.frameTime++; if(f.frameTime%4===0)f.frame=(f.frame+1)%4;
+    f.vy+=GRAV; if(f.vy>9)f.vy=9;
+    f.x+=f.vx; let hx=tilesOverlap(f.x,f.y,f.w,f.h);
+    if(hx.length){ f.alive=false; spark(f.x,f.y,C.orange,6); continue; }
+    f.y+=f.vy; let hy=tilesOverlap(f.x,f.y,f.w,f.h);
+    if(hy.length){
+      if(f.vy>0){ f.y=Math.min(...hy.map(h=>h.r*TILE))-f.h; f.vy=-7; f.bounces++; }
+      else { f.y=Math.max(...hy.map(h=>(h.r+1)*TILE)); f.vy=1; } // 修复：处理天花板碰撞
+    }
+    if(f.bounces>6||f.y>world.h+50||f.x<0||f.x>world.w) f.alive=false;
+  }
+  fireballs=fireballs.filter(f=>f.alive);
+}
+
+/* ========== 粒子/浮字 ========== */
+function updateParticles(){
+  // 限制粒子数量
+  if(particles.length>120) particles.splice(0,particles.length-120);
+  for(const p of particles){ p.x+=p.vx; p.y+=p.vy; p.vy+=0.25; p.life--; }
+  particles=particles.filter(p=>p.life>0);
+  for(const f of floats){ f.y+=f.vy; f.life--; }
+  floats=floats.filter(f=>f.life>0);
+  // 砖块弹跳
+  for(const [k,b] of bumpMap){ b.t++; b.off=b.t<8?-Math.sin(b.t/8*Math.PI)*10:0; if(b.t>16) bumpMap.delete(k); }
+}
+
+/* ========== 胜负 ========== */
+function winLevel(){
+  if(state!==GS.PLAY)return;
+  state=GS.WIN; winTimer=0; SFX.win(); stopMusic();
+  score+=time*50;
+  floatText(player.x,player.y-20,'+'+(time*50),C.yellow);
+}
+function afterDeath(){
+  lives--;
+  if(lives<=0){ state=GS.GAMEOVER; stopMusic(); }
+  else { buildLevel(lvlNum); state=GS.PLAY; startMusic(); }
+}
+
+/* ========== 相机 ========== */
+function updateCamera(){
+  const target=player.x-VW*0.42;
+  world.cam+=(target-world.cam)*0.12;
+  if(world.cam<0)world.cam=0;
+  if(world.cam>world.w-VW)world.cam=world.w-VW;
+}
+
+/* ========== 渲染 ========== */
+function drawBackground(){
+  const g=ctx.createLinearGradient(0,0,0,VH);
+  g.addColorStop(0,C.skyTop); g.addColorStop(1,C.sky);
+  ctx.fillStyle=g; ctx.fillRect(0,0,VW,VH);
+
+  // 视差云和山（从装饰物列表绘制，不再遍历全图！）
+  const par=world.cam*0.4;
+  ctx.save(); ctx.translate(-par,0);
+  for(const d of decoClouds) drawCloud(d.c*TILE+TILE/2, d.r*TILE+TILE/2);
+  for(const d of decoHills) drawHill(d.c*TILE, d.r*TILE);
+  ctx.restore();
+}
+
+function drawTiles(){
+  const c0=Math.floor(world.cam/TILE)-1, c1=Math.floor((world.cam+VW)/TILE)+1;
+  for(let r=0;r<world.rows;r++){
+    for(let c=Math.max(0,c0);c<=Math.min(world.cols-1,c1);c++){
+      const t=world.tiles[r*world.cols+c];
+      if(t===T.EMPTY) continue;
+      const x=c*TILE-world.cam, y=r*TILE;
+      const bk=bumpKey(c,r); const b=bumpMap.get(bk); const yo=b?b.off:0;
+      drawTile(t,x,y+yo,c,r);
+    }
+  }
+}
+
+// 问号方块脉冲值每帧只算一次
+let qPulse=0;
+function drawTile(t,x,y,c,r){
+  switch(t){
+    case T.GROUND: {
+      ctx.fillStyle=C.brownD; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle=C.brown; ctx.fillRect(x,y,TILE,TILE-6);
+      ctx.fillStyle=C.green; ctx.fillRect(x,y,TILE,8);
+      ctx.fillStyle=C.greenL; ctx.fillRect(x,y,TILE,3);
+      ctx.fillStyle=C.brownD;
+      ctx.fillRect(x+6,y+14,3,3); ctx.fillRect(x+20,y+20,3,3); ctx.fillRect(x+12,y+24,2,2);
+      ctx.strokeStyle='rgba(0,0,0,.15)'; ctx.lineWidth=1;
+      ctx.strokeRect(x+.5,y+.5,TILE-1,TILE-1);
+      break;
+    }
+    case T.BRICK: {
+      ctx.fillStyle=C.brownD; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle=C.brown; ctx.fillRect(x+1,y+1,TILE-2,TILE-2);
+      ctx.fillStyle=C.brownD;
+      ctx.fillRect(x,y+15,TILE,2); ctx.fillRect(x+15,y,2,15); ctx.fillRect(x+7,y+17,2,14); ctx.fillRect(x+23,y+17,2,14);
+      ctx.fillStyle=C.tan; ctx.fillRect(x+1,y+1,TILE-2,2);
+      break;
+    }
+    case T.QCOIN: case T.QMUSH: case T.QFIRE: {
+      drawQuestion(x,y);
+      break;
+    }
+    case T.USED: {
+      ctx.fillStyle=C.metalD; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle=C.metal; ctx.fillRect(x+2,y+2,TILE-4,TILE-4);
+      ctx.fillStyle='rgba(0,0,0,.25)'; ctx.fillRect(x+2,y+TILE-6,TILE-4,4);
+      ctx.fillStyle='rgba(255,255,255,.3)'; ctx.fillRect(x+2,y+2,TILE-4,3);
+      break;
+    }
+    case T.PIPE: case T.PIPETOP: drawPipe(x,y,c,r,t===T.PIPETOP); break;
+    case T.STAIR: case T.HARD: {
+      ctx.fillStyle=C.metalD; ctx.fillRect(x,y,TILE,TILE);
+      ctx.fillStyle='#9fb0c0'; ctx.fillRect(x+1,y+1,TILE-2,TILE-2);
+      ctx.fillStyle='rgba(255,255,255,.35)'; ctx.fillRect(x+1,y+1,TILE-2,4);
+      ctx.fillStyle='rgba(0,0,0,.2)'; ctx.fillRect(x+1,y+TILE-5,TILE-2,4);
+      ctx.strokeStyle='rgba(0,0,0,.2)'; ctx.strokeRect(x+.5,y+.5,TILE-1,TILE-1);
+      break;
+    }
+    case T.COIN: drawCoinSpin(x+TILE/2,y+TILE/2,16,(performance.now()/100|0)%4); break;
+    case T.POLE: drawPole(x,y,false); break;
+    case T.POLETOP: drawPole(x,y,true); break;
+    case T.POLEBASE: {
+      ctx.fillStyle=C.greenD; ctx.fillRect(x+8,y,TILE-16,TILE);
+      ctx.fillStyle=C.green; ctx.fillRect(x+10,y,TILE-20,TILE);
+      break;
+    }
+    case T.BUSH: drawBush(x,y); break;
+    case T.HILL: drawHill(x,y); break;
+    case T.CLOUD: drawCloud(x+TILE/2,y+TILE/2); break;
+  }
+}
+
+function drawQuestion(x,y){
+  qPulse=0.5+0.5*Math.sin(performance.now()/180);
+  ctx.fillStyle='#e0a020'; ctx.fillRect(x,y,TILE,TILE);
+  ctx.fillStyle='#8a5a00'; ctx.fillRect(x,y,TILE,3); ctx.fillRect(x,y+TILE-3,TILE,3);
+  ctx.fillRect(x,y,3,TILE); ctx.fillRect(x+TILE-3,y,3,TILE);
+  ctx.fillStyle='#6a4500';
+  ctx.fillRect(x+3,y+3,4,4); ctx.fillRect(x+TILE-7,y+3,4,4);
+  ctx.fillRect(x+3,y+TILE-7,4,4); ctx.fillRect(x+TILE-7,y+TILE-7,4,4);
+  ctx.fillStyle='#f5b820'; ctx.fillRect(x+5,y+5,TILE-10,TILE-10);
+  ctx.fillStyle=`rgba(255,240,150,${0.3+0.4*qPulse})`; ctx.fillRect(x+5,y+5,TILE-10,4);
+  ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('?',x+TILE/2,y+TILE/2+1);
+  ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(x+TILE/2-2,y+TILE/2+8,4,3);
+}
+
+function drawPipe(x,y,c,r,isTop){
+  ctx.fillStyle=C.pipeD; ctx.fillRect(x,y,TILE,TILE);
+  ctx.fillStyle=C.pipe; ctx.fillRect(x+3,y,TILE-6,TILE);
+  ctx.fillStyle=C.pipeL; ctx.fillRect(x+5,y,4,TILE);
+  ctx.fillStyle='rgba(0,0,0,.2)'; ctx.fillRect(x+TILE-7,y,4,TILE);
+  if(isTop){
+    ctx.fillStyle=C.pipeD; ctx.fillRect(x-2,y,TILE+4,12);
+    ctx.fillStyle=C.pipe; ctx.fillRect(x,y,TILE,10);
+    ctx.fillStyle=C.pipeL; ctx.fillRect(x+2,y+1,5,8);
+    ctx.fillStyle='rgba(0,0,0,.2)'; ctx.fillRect(x+TILE-6,y+1,4,8);
+    ctx.fillStyle='rgba(0,0,0,.25)'; ctx.fillRect(x-2,y+10,TILE+4,2);
+  }
+}
+
+function drawCoinSpin(cx,cy,sz,frame){
+  const w=frame===0||frame===2?sz:(frame===1?sz*0.4:sz*0.7);
+  ctx.save(); ctx.translate(cx,cy);
+  ctx.fillStyle=C.coinD; ctx.beginPath(); ctx.ellipse(0,0,w/2+1,sz/2+1,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C.coin; ctx.beginPath(); ctx.ellipse(0,0,w/2,sz/2,0,0,Math.PI*2); ctx.fill();
+  if(w>8){ ctx.fillStyle=C.coinD; ctx.fillRect(-1,-sz/3,2,sz*2/3); }
+  ctx.restore();
+}
+
+function drawPole(x,y,top){
+  ctx.fillStyle='#cfcfcf'; ctx.fillRect(x+TILE/2-3,y,6,TILE);
+  ctx.fillStyle='#fff'; ctx.fillRect(x+TILE/2-3,y,2,TILE);
+  if(top){
+    ctx.fillStyle='#1fae2a'; ctx.beginPath(); ctx.arc(x+TILE/2,y-2,8,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.greenL; ctx.beginPath(); ctx.arc(x+TILE/2-2,y-4,3,0,Math.PI*2); ctx.fill();
+  }
+}
+
+function drawBush(x,y){
+  ctx.fillStyle=C.greenD;
+  ctx.beginPath(); ctx.arc(x+8,y+18,10,Math.PI,0); ctx.arc(x+24,y+14,14,Math.PI,0); ctx.arc(x+TILE-8,y+18,10,Math.PI,0); ctx.fill();
+  ctx.fillStyle=C.green;
+  ctx.beginPath(); ctx.arc(x+8,y+18,8,Math.PI,0); ctx.arc(x+24,y+14,12,Math.PI,0); ctx.arc(x+TILE-8,y+18,8,Math.PI,0); ctx.fill();
+}
+
+function drawHill(x,y){
+  ctx.fillStyle=C.greenD;
+  ctx.beginPath(); ctx.moveTo(x-32,y+TILE); ctx.quadraticCurveTo(x,y-32,x+32,y+TILE); ctx.fill();
+  ctx.fillStyle=C.green;
+  ctx.beginPath(); ctx.moveTo(x-24,y+TILE); ctx.quadraticCurveTo(x,y-22,x+24,y+TILE); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,y-14,5,0,Math.PI*2); ctx.fill();
+}
+
+function drawCloud(cx,cy){
+  ctx.fillStyle='rgba(255,255,255,.9)';
+  ctx.beginPath();
+  ctx.arc(cx,cy,10,0,Math.PI*2); ctx.arc(cx+14,cy-6,14,0,Math.PI*2); ctx.arc(cx+32,cy,12,0,Math.PI*2);
+  ctx.arc(cx+20,cy+4,12,0,Math.PI*2); ctx.fill();
+}
+
+/* ========== 玩家绘制 ========== */
+function drawPlayer(){
+  const p=player;
+  if(p.invuln>0 && Math.floor(p.invuln/4)%2===0) return;
+  const x=p.x-world.cam, y=p.y;
+  const fire=p.state==='fire';
+  const big=p.state!=='small';
+  const overalls=fire?C.white:C.blue;
+  const overallsD=fire?'#cccccc':C.blueD;
+  ctx.save();
+  if(p.facing<0){ ctx.translate(x+p.w,0); ctx.scale(-1,1); } else ctx.translate(x,0);
+  drawMarioBody(0,y,p.w,p.h,{big,fire,pose:p.pose,phase:p.walkPhase,crouch:p.crouching,overalls,overallsD});
+  ctx.restore();
+}
+
+function drawMarioBody(x,y,w,h,o){
+  const u=w/16;
+  const top=y;
+  const hatH=h*0.16, faceH=h*0.22, torsoH=h*0.26, legH=h-hatH-faceH-torsoH;
+  let lShoeX=3*u, rShoeX=9*u, shoeY=top+hatH+faceH+torsoH+legH*0.5;
+  if(o.pose==='walk'){ const s=Math.sin(o.phase); lShoeX=3*u+s*3*u; rShoeX=9*u-s*3*u; }
+  else if(o.pose==='jump'){ lShoeX=4*u; rShoeX=10*u; shoeY=top+hatH+faceH+torsoH+legH*0.3; }
+  else if(o.pose==='brake'){ lShoeX=2*u; rShoeX=11*u; }
+
+  // 帽子
+  ctx.fillStyle=C.red; roundRect(x+1*u,top,13*u,hatH,2); ctx.fill();
+  ctx.fillStyle=C.redD; roundRect(x+1*u,top+hatH-2,13*u,2,1); ctx.fill();
+  ctx.fillStyle=C.red; roundRect(x+4*u,top+hatH-2,11*u,3,1); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillRect(x+6*u,top+hatH*0.3,2*u,2); ctx.fillRect(x+8*u,top+hatH*0.3,1,1);
+
+  // 头发
+  ctx.fillStyle=C.hair;
+  ctx.fillRect(x+1*u,top+hatH,3*u,faceH*0.5); ctx.fillRect(x+1*u,top+hatH+faceH*0.4,2*u,faceH*0.5);
+
+  // 脸
+  const faceY=top+hatH;
+  ctx.fillStyle=C.skin; roundRect(x+3*u,faceY,11*u,faceH,2); ctx.fill();
+  ctx.fillRect(x+3*u,faceY+faceH*0.4,1.5*u,faceH*0.4);
+  ctx.fillStyle=C.hair;
+  ctx.fillRect(x+3*u,faceY,4*u,faceH*0.25); ctx.fillRect(x+7*u,faceY,1*u,faceH*0.18);
+  // 眼
+  ctx.fillStyle='#fff'; ctx.fillRect(x+9*u,faceY+faceH*0.25,2*u,faceH*0.28);
+  ctx.fillStyle=C.black; ctx.fillRect(x+10*u,faceY+faceH*0.28,1*u,faceH*0.24);
+  // 鼻
+  ctx.fillStyle=C.skinS; ctx.fillRect(x+12.5*u,faceY+faceH*0.35,2*u,faceH*0.3);
+  // 胡子
+  ctx.fillStyle=C.hairD; ctx.fillRect(x+9*u,faceY+faceH*0.62,5*u,faceH*0.22);
+
+  // 身体
+  const bodyY=top+hatH+faceH;
+  ctx.fillStyle=C.red; ctx.fillRect(x+1*u,bodyY+2,3*u,torsoH*0.8); ctx.fillRect(x+12*u,bodyY+2,3*u,torsoH*0.8);
+  ctx.fillStyle=C.red; roundRect(x+3*u,bodyY,10*u,torsoH,2); ctx.fill();
+  ctx.fillStyle=o.overalls; roundRect(x+3*u,bodyY+torsoH*0.35,10*u,torsoH*0.65,2); ctx.fill();
+  ctx.fillStyle=o.overalls; ctx.fillRect(x+4.5*u,bodyY,1.5*u,torsoH*0.5); ctx.fillRect(x+10*u,bodyY,1.5*u,torsoH*0.5);
+  ctx.fillStyle=C.yellow; ctx.fillRect(x+4.5*u,bodyY+torsoH*0.4,1.6*u,1.6*u); ctx.fillRect(x+10*u,bodyY+torsoH*0.4,1.6*u,1.6*u);
+  // 手
+  ctx.fillStyle=C.skin;
+  ctx.fillRect(x+0.5*u,bodyY+torsoH*0.7,2.5*u,2.5*u); ctx.fillRect(x+13*u,bodyY+torsoH*0.7,2.5*u,2.5*u);
+
+  // 腿+鞋
+  const legY=bodyY+torsoH;
+  ctx.fillStyle=o.overalls; ctx.fillRect(x+4*u,legY,3*u,legH*0.55); ctx.fillRect(x+9*u,legY,3*u,legH*0.55);
+  ctx.fillStyle=C.hairD;
+  roundRect(x+lShoeX-1*u,shoeY,5*u,legH*0.4,2); ctx.fill();
+  roundRect(x+rShoeX-1*u,shoeY,5*u,legH*0.4,2); ctx.fill();
+}
+
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+/* ========== 敌人绘制 ========== */
+function drawEnemies(){
+  for(const e of enemies){
+    const x=e.x-world.cam, y=e.y;
+    if(e.type==='goomba') drawGoomba(x,y,e);
+    else drawKoopa(x,y,e);
+  }
+}
+
+function drawGoomba(x,y,e){
+  if(e.state==='squished'){ y=y+e.h-10; ctx.fillStyle=C.goombaD; roundRect(x,y,e.w,12,4); ctx.fill(); return; }
+  if(e.state==='dead'){ ctx.save(); ctx.translate(x+e.w/2,y+e.h/2); ctx.scale(1,-1); ctx.translate(-e.w/2,-e.h/2); drawGoombaBody(0,0,e); ctx.restore(); return; }
+  drawGoombaBody(x,y,e);
+}
+
+function drawGoombaBody(x,y,e){
+  ctx.fillStyle=C.goombaD; ctx.beginPath(); ctx.ellipse(x+e.w/2,y+e.h*0.55,e.w/2,e.h*0.5,0,Math.PI,0); ctx.fill();
+  ctx.fillStyle=C.goomba; ctx.beginPath(); ctx.ellipse(x+e.w/2,y+e.h*0.55,e.w/2-1,e.h*0.45,0,Math.PI,0); ctx.fill();
+  ctx.fillStyle=C.tan; ctx.beginPath(); ctx.ellipse(x+e.w/2,y+e.h*0.6,e.w/2-2,e.h*0.4,0,0,Math.PI); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillRect(x+5,y+e.h*0.45,5,7); ctx.fillRect(x+e.w-10,y+e.h*0.45,5,7);
+  ctx.fillStyle='#000'; ctx.fillRect(x+7,y+e.h*0.47,3,5); ctx.fillRect(x+e.w-8,y+e.h*0.47,3,5);
+  ctx.fillStyle=C.goombaD; ctx.fillRect(x+4,y+e.h*0.4,7,2); ctx.fillRect(x+e.w-11,y+e.h*0.4,7,2);
+  ctx.fillStyle=C.goombaD; const s=e.frame?1:-1;
+  roundRect(x+1,y+e.h-8,9,8,3); ctx.fill(); roundRect(x+e.w-10,y+e.h-8+(s?2:-2),9,8,3); ctx.fill();
+}
+
+function drawKoopa(x,y,e){
+  if(e.state==='shell'){
+    ctx.fillStyle=C.koopaD; ctx.beginPath(); ctx.ellipse(x+e.w/2,y+e.h/2,e.w/2,e.h/2,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.shell; ctx.beginPath(); ctx.ellipse(x+e.w/2,y+e.h/2,e.w/2-2,e.h/2-2,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.koopaY; ctx.beginPath();
+    const cx=x+e.w/2, cy=y+e.h/2;
+    for(let i=0;i<6;i++){ const a=i*Math.PI/3; if(i===0)ctx.moveTo(cx+Math.cos(a)*6,cy+Math.sin(a)*6); else ctx.lineTo(cx+Math.cos(a)*6,cy+Math.sin(a)*6); } ctx.closePath(); ctx.fill();
+    ctx.fillStyle=C.koopaD; ctx.fillRect(cx-2,cy-2,4,4); return;
+  }
+  if(e.state==='dead'){ ctx.save(); ctx.translate(x+e.w/2,y+e.h/2); ctx.scale(1,-1); ctx.translate(-e.w/2,-e.h/2); drawKoopaBody(0,0,e); ctx.restore(); return; }
+  drawKoopaBody(x,y,e);
+}
+
+function drawKoopaBody(x,y,e){
+  ctx.fillStyle=C.koopaD; roundRect(x+2,y+e.h*0.45,e.w-4,e.h*0.5,6); ctx.fill();
+  ctx.fillStyle=C.shell; roundRect(x+4,y+e.h*0.47,e.w-8,e.h*0.45,5); ctx.fill();
+  ctx.fillStyle=C.koopaY; ctx.fillRect(x+e.w/2-3,y+e.h*0.55,6,e.h*0.3);
+  ctx.fillStyle=C.koopa; roundRect(x+e.w*0.4,y+e.h*0.1,e.w*0.55,e.h*0.45,5); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillRect(x+e.w*0.7,y+e.h*0.2,5,6);
+  ctx.fillStyle='#000'; ctx.fillRect(x+e.w*0.74,y+e.h*0.22,3,4);
+  ctx.fillStyle=C.koopaY; ctx.fillRect(x+e.w*0.55,y+e.h*0.42,e.w*0.3,3);
+  ctx.fillStyle=C.koopaD;
+  roundRect(x+3,y+e.h-7,9,7,3); ctx.fill();
+  roundRect(x+e.w-12,y+e.h-7+(e.frame?2:-2),9,7,3); ctx.fill();
+}
+
+/* ========== 道具绘制 ========== */
+function drawItems(){
+  for(const it of items){
+    const x=it.x-world.cam, y=it.y;
+    if(it.type==='mushroom') drawMushroom(x,y,it.w,it.h);
+    else if(it.type==='fire') drawFireFlower(x,y,it.w,it.h);
+  }
+}
+
+function drawMushroom(x,y,w,h){
+  ctx.fillStyle=C.redD; roundRect(x+1,y,w-2,h*0.6,6); ctx.fill();
+  ctx.fillStyle=C.red; roundRect(x+2,y+1,w-4,h*0.55,5); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillRect(x+4,y+3,5,5); ctx.fillRect(x+w-9,y+3,5,5); ctx.fillRect(x+w/2-2,y+5,4,5);
+  ctx.fillStyle=C.skin; roundRect(x+3,y+h*0.55,w-6,h*0.45,4); ctx.fill();
+  ctx.fillStyle='#000'; ctx.fillRect(x+6,y+h*0.6,3,5); ctx.fillRect(x+w-9,y+h*0.6,3,5);
+}
+
+function drawFireFlower(x,y,w,h){
+  const pulse=0.5+0.5*Math.sin(performance.now()/300);
+  ctx.fillStyle='#ff6a00';
+  ctx.beginPath(); ctx.arc(x+w/2,y+h*0.4,w*0.42,0,Math.PI*2); ctx.fill();
+  const rcol=`rgb(${Math.floor(255*pulse+200)},${Math.floor(150*pulse+50)},${Math.floor(50*(1-pulse))})`;
+  ctx.fillStyle=rcol;
+  ctx.beginPath(); ctx.arc(x+w/2,y+h*0.4,w*0.25,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillRect(x+w/2-1,y+h*0.35,2,4);
+  ctx.fillStyle=C.green; ctx.fillRect(x+w/2-2,y+h*0.5,4,h*0.5);
+  ctx.fillStyle=C.greenL; ctx.beginPath(); ctx.ellipse(x+w*0.2,y+h*0.65,5,3,0.5,0,Math.PI*2); ctx.fill();
+}
+
+/* ========== 火球 ========== */
+function drawFireballs(){
+  for(const f of fireballs){
+    const x=f.x-world.cam, y=f.y;
+    const cols=['#fff','#ffd54a','#ff8c00','#e52521'];
+    ctx.fillStyle=cols[(f.frame)%4];
+    ctx.beginPath(); ctx.arc(x+f.w/2,y+f.h/2,f.w/2,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x+f.w/2-1,y+f.h/2-1,2,0,Math.PI*2); ctx.fill();
+  }
+}
+
+/* ========== 粒子/浮字 ========== */
+function drawParticles(){
+  for(const p of particles){ ctx.fillStyle=p.color; ctx.fillRect(p.x-world.cam,p.y,p.size,p.size); }
+  for(const f of floats){
+    ctx.fillStyle=f.color; ctx.font='bold 14px monospace'; ctx.textAlign='center';
+    ctx.globalAlpha=Math.min(1,f.life/30); ctx.fillText(f.txt,f.x-world.cam,f.y); ctx.globalAlpha=1;
+  }
+}
+
+/* ========== HUD ========== */
+function drawHUD(){
+  ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(0,0,VW,34);
+  ctx.fillStyle='#fff'; ctx.textAlign='left'; ctx.textBaseline='top'; ctx.font='14px monospace';
+  ctx.fillText('MARIO',20,6);
+  ctx.fillText(String(score).padStart(6,'0'),20,18);
+  ctx.fillStyle=C.coin; ctx.beginPath(); ctx.arc(150,20,6,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.fillText('x'+String(coins).padStart(2,'0'),162,14);
+  ctx.fillText('WORLD',300,6);
+  ctx.fillText((lvlNum+1)+'-1',312,18);
+  ctx.fillText('TIME',430,6);
+  ctx.fillText(String(Math.max(0,Math.floor(time))).padStart(3,'0'),440,18);
+  ctx.fillText('LIVES',540,6);
+  ctx.fillText('x'+lives,552,18);
+  ctx.save(); ctx.translate(580,4); ctx.scale(0.5,0.5); drawMarioBody(0,0,24,30,{big:false,fire:false,pose:'stand',phase:0}); ctx.restore();
+}
+
+/* ========== 标题/结算 ========== */
+function drawTitle(){
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(0,0,VW,VH);
+  ctx.textAlign='center';
+  ctx.fillStyle=C.red; ctx.font='bold 56px monospace'; ctx.fillText('SUPER MARIO',VW/2,VH*0.28);
+  ctx.fillStyle='#fff'; ctx.font='16px monospace'; ctx.fillText('移动端优化版 · HTML5',VW/2,VH*0.36);
+  if(Math.floor(performance.now()/500)%2===0){
+    ctx.fillStyle=C.yellow; ctx.font='bold 20px monospace'; ctx.fillText('按任意键 / 点击屏幕开始',VW/2,VH*0.6);
+  }
+  ctx.fillStyle='#cde'; ctx.font='12px monospace';
+  ctx.fillText('← → 移动 · ↑/Space 跳跃 · Shift 加速 · Z/X 火球',VW/2,VH*0.72);
+  ctx.fillText('踩敌人得分 · 吃蘑菇变大 · 吃火花吐火球 · 到达旗杆通关',VW/2,VH*0.78);
+  ctx.save(); ctx.translate(VW/2-24,VH*0.46); ctx.scale(2,2); drawMarioBody(0,0,24,30,{big:false,fire:false,pose:'walk',phase:performance.now()/120}); ctx.restore();
+}
+
+function drawWin(){
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(0,0,VW,VH);
+  ctx.textAlign='center';
+  ctx.fillStyle=C.yellow; ctx.font='bold 48px monospace'; ctx.fillText('COURSE CLEAR!',VW/2,VH*0.35);
+  ctx.fillStyle='#fff'; ctx.font='18px monospace';
+  ctx.fillText('得分：'+score,VW/2,VH*0.5);
+  ctx.fillText('Time Bonus: +'+(time*50),VW/2,VH*0.56);
+  if(Math.floor(performance.now()/500)%2===0){ ctx.fillStyle=C.greenL; ctx.font='16px monospace'; ctx.fillText('按任意键进入下一关',VW/2,VH*0.72); }
+}
+
+function drawGameOver(){
+  ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,VW,VH);
+  ctx.textAlign='center';
+  ctx.fillStyle=C.red; ctx.font='bold 48px monospace'; ctx.fillText('GAME OVER',VW/2,VH*0.4);
+  ctx.fillStyle='#fff'; ctx.font='18px monospace'; ctx.fillText('得分：'+score,VW/2,VH*0.55);
+  if(Math.floor(performance.now()/500)%2===0){ ctx.fillText('按任意键重新开始',VW/2,VH*0.7); }
+}
+
+/* ========== 主循环 ========== */
+function startGameMaybe(){
+  audio();
+  if(state===GS.TITLE){ score=0;coins=0;lives=3;buildLevel(0);state=GS.PLAY; startMusic(); }
+  else if(state===GS.WIN){ buildLevel(lvlNum+1);state=GS.PLAY; startMusic(); }
+  else if(state===GS.GAMEOVER){ score=0;coins=0;lives=3;buildLevel(0);state=GS.PLAY; startMusic(); }
+}
+
+let last=performance.now(), acc=0;
+const STEP=1000/60;
+
+function loop(now){
+  acc+=now-last; last=now;
+  if(acc>200)acc=200;
+  while(acc>=STEP){ tick(); acc-=STEP; }
+  render();
+  requestAnimationFrame(loop);
+}
+
+function tick(){
+  if(state===GS.PLAY){
+    timeAcc+=STEP; if(timeAcc>=1000){ timeAcc-=1000; time--; if(time<=0){ time=0; killPlayer(true); } }
+    updatePlayer();
+    updateEnemies();
+    updateItems();
+    updateFireballs();
+    updateParticles();
+    updateCamera();
+  } else if(state===GS.DEAD){
+    updatePlayer();
+    updateParticles();
+  } else if(state===GS.WIN){
+    // 滑下旗杆
+    winTimer++;
+    if(winTimer<40){ if(player.y+player.h<flagBaseY){ player.y+=2; } }
+    else if(winTimer<80){ player.vx=1.5; player.x+=player.vx; player.pose='walk'; player.walkPhase+=0.3; }
+    updateParticles();
+  } else {
+    updateParticles();
+  }
+}
+
+function render(){
+  ctx.clearRect(0,0,VW,VH);
+  if(state===GS.TITLE){ drawBackground(); drawTitle(); return; }
+  drawBackground();
+  drawTiles();
+  drawItems();
+  drawEnemies();
+  drawFireballs();
+  if(player) drawPlayer();
+  drawParticles();
+  drawHUD();
+  if(state===GS.WIN) drawWin();
+  else if(state===GS.GAMEOVER) drawGameOver();
+}
+
+// 启动
+buildLevel(0);
+state=GS.TITLE;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
